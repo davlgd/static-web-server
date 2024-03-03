@@ -135,6 +135,7 @@ pub mod https_redirect;
 #[macro_use]
 pub mod logger;
 pub mod maintenance_mode;
+pub mod mem_cache;
 pub mod redirects;
 pub mod rewrites;
 pub mod security_headers;

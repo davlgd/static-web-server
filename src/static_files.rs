@@ -9,7 +9,7 @@
 // Part of the file is borrowed and adapted at a convenience from
 // https://github.com/seanmonstar/warp/blob/master/src/filters/fs.rs
 
-use bytes::{Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use futures_util::{
     future,
     future::{Either, Future},
@@ -19,7 +19,10 @@ use headers::{
     AcceptRanges, ContentLength, ContentRange, ContentType, HeaderMap, HeaderMapExt, HeaderValue,
     IfModifiedSince, IfRange, IfUnmodifiedSince, LastModified, Range,
 };
-use hyper::{header::CONTENT_ENCODING, header::CONTENT_LENGTH, Body, Method, Response, StatusCode};
+use hyper::{
+    header::{CONTENT_ENCODING, CONTENT_LENGTH},
+    Body, Method, Response, StatusCode,
+};
 use percent_encoding::percent_decode_str;
 use std::fs::{File, Metadata};
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
@@ -31,14 +34,18 @@ use std::task::{Context, Poll};
 #[cfg(feature = "compression")]
 use crate::compression_static;
 
-use crate::exts::http::{MethodExt, HTTP_SUPPORTED_METHODS};
 use crate::exts::path::PathExt;
 use crate::Result;
+use crate::{
+    exts::http::{MethodExt, HTTP_SUPPORTED_METHODS},
+    mem_cache::MEM_CACHE,
+};
 
 #[cfg(feature = "directory-listing")]
 use crate::{
     directory_listing,
     directory_listing::{DirListFmt, DirListOpts},
+    mem_cache::MemFile,
 };
 
 const DEFAULT_INDEX_FILES: &[&str; 1] = &["index.html"];
@@ -47,6 +54,8 @@ const DEFAULT_INDEX_FILES: &[&str; 1] = &["index.html"];
 pub struct HandleOpts<'a> {
     /// Request method.
     pub method: &'a Method,
+    /// In-memory files cache feature.
+    pub memory_cache: bool,
     /// Request headers.
     pub headers: &'a HeaderMap<HeaderValue>,
     /// Request base path.
@@ -90,6 +99,23 @@ pub async fn handle<'a>(opts: &HandleOpts<'a>) -> Result<(Response<Body>, bool),
 
     let headers_opt = opts.headers;
     let mut file_path = sanitize_path(opts.base_path, uri_path)?;
+
+    // In-memory file cache feature with eviction policy
+    if opts.memory_cache {
+        if let Some(path_str) = file_path.to_str() {
+            if let Ok(mut guard) = MEM_CACHE.lock() {
+                if let Some(mem_file) = guard.get(path_str) {
+                    tracing::debug!(
+                        "file `{}` found in the cache, returning it immediately",
+                        path_str
+                    );
+                    let resp = mem_cache_response_body(mem_file, headers_opt)?;
+                    let is_precompressed = false;
+                    return Ok((resp, is_precompressed));
+                }
+            }
+        }
+    }
 
     let FileMetadata {
         file_path,
@@ -166,7 +192,14 @@ pub async fn handle<'a>(opts: &HandleOpts<'a>) -> Result<(Response<Body>, bool),
     // Check for a pre-compressed file variant if present under the `opts.compression_static` context
     if let Some(precompressed_meta) = precompressed_variant {
         let (precomp_path, precomp_ext) = precompressed_meta;
-        let mut resp = file_reply(headers_opt, file_path, &metadata, Some(precomp_path)).await?;
+        let mut resp = file_reply(
+            headers_opt,
+            file_path,
+            &metadata,
+            Some(precomp_path),
+            opts.memory_cache,
+        )
+        .await?;
 
         // Prepare corresponding headers to let know how to decode the payload
         resp.headers_mut().remove(CONTENT_LENGTH);
@@ -176,7 +209,7 @@ pub async fn handle<'a>(opts: &HandleOpts<'a>) -> Result<(Response<Body>, bool),
         return Ok((resp, is_precompressed));
     }
 
-    let resp = file_reply(headers_opt, file_path, &metadata, None).await?;
+    let resp = file_reply(headers_opt, file_path, &metadata, None, opts.memory_cache).await?;
 
     Ok((resp, is_precompressed))
 }
@@ -209,10 +242,9 @@ fn suffix_file_html_metadata(file_path: &mut PathBuf) -> (&mut PathBuf, Option<M
         if let Ok(meta_res) = file_metadata(file_path) {
             let (meta, _) = meta_res;
             return (file_path, Some(meta));
-        } else {
-            // We roll-back to the previous filename
-            file_path.set_file_name(owned_filename);
         }
+        // We roll-back to the previous filename
+        file_path.set_file_name(owned_filename);
     }
     (file_path, None)
 }
@@ -394,13 +426,14 @@ fn file_reply<'a>(
     path: &'a PathBuf,
     meta: &'a Metadata,
     path_precompressed: Option<PathBuf>,
+    memory_cache: bool,
 ) -> impl Future<Output = Result<Response<Body>, StatusCode>> + Send + 'a {
     let conditionals = get_conditional_headers(headers);
 
     let file_path = path_precompressed.as_ref().unwrap_or(path);
 
     match File::open(file_path) {
-        Ok(file) => Either::Left(response_body(file, path, meta, conditionals)),
+        Ok(file) => Either::Left(response_body(file, path, meta, conditionals, memory_cache)),
         Err(err) => {
             let status = match err.kind() {
                 io::ErrorKind::NotFound => {
@@ -569,6 +602,7 @@ fn get_block_size(_metadata: &Metadata) -> usize {
 struct FileStream<T> {
     reader: T,
     buf_size: usize,
+    path_str: Option<String>,
 }
 
 impl<T: Read + Unpin> Stream for FileStream<T> {
@@ -576,11 +610,20 @@ impl<T: Read + Unpin> Stream for FileStream<T> {
 
     fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut buf = BytesMut::zeroed(self.buf_size);
+        let path_str = self.path_str.to_owned();
+
         match Pin::into_inner(self).reader.read(&mut buf[..]) {
             Ok(n) => {
                 if n == 0 {
                     Poll::Ready(None)
                 } else {
+                    if let Some(s) = path_str {
+                        if let Ok(mut guard) = MEM_CACHE.lock() {
+                            if let Some(mem_file) = guard.get_mut(s.as_str()) {
+                                mem_file.bytes.put(buf.clone());
+                            }
+                        }
+                    }
                     buf.truncate(n);
                     Poll::Ready(Some(Ok(buf.freeze())))
                 }
@@ -595,6 +638,7 @@ async fn response_body(
     path: &PathBuf,
     meta: &Metadata,
     conditionals: Conditionals,
+    mem_cache: bool,
 ) -> Result<Response<Body>, StatusCode> {
     let mut len = meta.len();
     let modified = meta.modified().ok().map(LastModified::from);
@@ -615,8 +659,107 @@ async fn response_body(
 
                     let sub_len = end - start;
                     let reader = BufReader::new(file).take(sub_len);
-                    let stream = FileStream { reader, buf_size };
 
+                    let mime = mime_guess::from_path(path).first_or_octet_stream();
+                    let content_type = ContentType::from(mime);
+
+                    // In-memory file cache
+                    let mut path_str = None;
+                    if mem_cache {
+                        if let Some(path_s) = path.to_str() {
+                            if let Ok(mut cache) = MEM_CACHE.lock() {
+                                let mem_file = MemFile {
+                                    bytes: BytesMut::with_capacity(len as usize),
+                                    buf_size,
+                                    content_type: content_type.clone(),
+                                    last_modified: modified,
+                                };
+                                cache.insert(path_s.into(), mem_file);
+                                path_str = Some(path_s.to_owned());
+                            }
+                        }
+                    }
+
+                    let body = Body::wrap_stream(FileStream {
+                        reader,
+                        buf_size,
+                        path_str,
+                    });
+                    let mut resp = Response::new(body);
+
+                    if sub_len != len {
+                        *resp.status_mut() = StatusCode::PARTIAL_CONTENT;
+                        resp.headers_mut().typed_insert(
+                            match ContentRange::bytes(start..end, len) {
+                                Ok(range) => range,
+                                Err(err) => {
+                                    tracing::error!("invalid content range error: {:?}", err);
+                                    let mut resp = Response::new(Body::empty());
+                                    *resp.status_mut() = StatusCode::RANGE_NOT_SATISFIABLE;
+                                    resp.headers_mut()
+                                        .typed_insert(ContentRange::unsatisfied_bytes(len));
+                                    return Ok(resp);
+                                }
+                            },
+                        );
+
+                        len = sub_len;
+                    }
+
+                    resp.headers_mut().typed_insert(ContentLength(len));
+                    resp.headers_mut().typed_insert(content_type);
+                    resp.headers_mut().typed_insert(AcceptRanges::bytes());
+
+                    if let Some(last_modified) = modified {
+                        resp.headers_mut().typed_insert(last_modified);
+                    }
+
+                    Ok(resp)
+                })
+                .unwrap_or_else(|BadRange| {
+                    // bad byte range
+                    let mut resp = Response::new(Body::empty());
+                    *resp.status_mut() = StatusCode::RANGE_NOT_SATISFIABLE;
+                    resp.headers_mut()
+                        .typed_insert(ContentRange::unsatisfied_bytes(len));
+                    Ok(resp)
+                })
+        }
+    }
+}
+
+fn mem_cache_response_body(
+    file: &MemFile,
+    headers: &HeaderMap,
+) -> Result<Response<Body>, StatusCode> {
+    let conditionals = get_conditional_headers(headers);
+    let modified = file.last_modified;
+
+    match conditionals.check(modified) {
+        Cond::NoBody(resp) => Ok(resp),
+        Cond::WithBody(range) => {
+            let buf = file.bytes.clone();
+            let mut len = buf.len() as u64;
+            let mut reader = std::io::Cursor::new(buf);
+            let buf_size = file.buf_size;
+
+            bytes_range(range, len)
+                .map(|(start, end)| {
+                    match reader.seek(SeekFrom::Start(start)) {
+                        Ok(_) => (),
+                        Err(err) => {
+                            tracing::error!("seek file from start error: {:?}", err);
+                            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                        }
+                    };
+
+                    let sub_len = end - start;
+                    let reader = reader.take(sub_len);
+                    let stream = FileStream {
+                        reader,
+                        buf_size,
+                        path_str: None,
+                    };
                     let body = Body::wrap_stream(stream);
                     let mut resp = Response::new(body);
 
@@ -639,10 +782,8 @@ async fn response_body(
                         len = sub_len;
                     }
 
-                    let mime = mime_guess::from_path(path).first_or_octet_stream();
-
                     resp.headers_mut().typed_insert(ContentLength(len));
-                    resp.headers_mut().typed_insert(ContentType::from(mime));
+                    resp.headers_mut().typed_insert(file.content_type.clone());
                     resp.headers_mut().typed_insert(AcceptRanges::bytes());
 
                     if let Some(last_modified) = modified {

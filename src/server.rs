@@ -324,10 +324,15 @@ impl Server {
             maintenance_mode_file.display()
         );
 
+        // In-memory files cache option
+        let memory_cache = general.memory_cache;
+        server_info!("in-memory files cache: enabled={}", memory_cache);
+
         // Create a service router for Hyper
         let router_service = RouterService::new(RequestHandler {
             opts: Arc::from(RequestHandlerOpts {
                 root_dir,
+                memory_cache,
                 compression,
                 compression_static,
                 #[cfg(feature = "directory-listing")]
