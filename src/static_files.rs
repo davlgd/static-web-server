@@ -9,27 +9,22 @@
 // Part of the file is borrowed and adapted at a convenience from
 // https://github.com/seanmonstar/warp/blob/master/src/filters/fs.rs
 
-use bytes::{BufMut, Bytes, BytesMut};
 use futures_util::{
     future,
     future::{Either, Future},
 };
-use headers::{
-    AcceptRanges, ContentLength, ContentRange, ContentType, HeaderMap, HeaderMapExt, HeaderValue,
-    IfModifiedSince, IfRange, IfUnmodifiedSince, LastModified, Range,
-};
+use headers::{AcceptRanges, HeaderMap, HeaderMapExt, HeaderValue};
 use hyper::{
     header::{CONTENT_ENCODING, CONTENT_LENGTH},
     Body, Method, Response, StatusCode,
 };
-use percent_encoding::percent_decode_str;
 use std::fs::{File, Metadata};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use crate::conditional_headers::ConditionalHeaders;
 use crate::file_path::{sanitize_path, PathExt};
 use crate::Result;
+use crate::{conditional_headers::ConditionalHeaders, mem_cache::mem_cache_response_body};
 use crate::{
     file_response::response_body,
     http_ext::{MethodExt, HTTP_SUPPORTED_METHODS},
@@ -42,7 +37,7 @@ use crate::compression_static;
 use crate::{
     directory_listing,
     directory_listing::{DirListFmt, DirListOpts},
-    mem_cache::MemFile,
+    mem_cache::MEM_CACHE,
 };
 
 const DEFAULT_INDEX_FILES: &[&str; 1] = &["index.html"];
@@ -362,6 +357,7 @@ async fn get_composed_file_metadata<'a>(
                     }
                 }
             }
+
             #[cfg(not(feature = "compression"))]
             if let Some(new_meta) = new_meta {
                 return Ok(FileMetadata {

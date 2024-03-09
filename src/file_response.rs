@@ -6,6 +6,7 @@
 //! Module to transition files into HTTP responses.
 //!
 
+use bytes::BytesMut;
 use headers::{
     AcceptRanges, ContentLength, ContentRange, ContentType, HeaderMapExt, LastModified, Range,
 };
@@ -17,12 +18,14 @@ use std::path::PathBuf;
 
 use crate::conditional_headers::{ConditionalBody, ConditionalHeaders};
 use crate::file_stream::{optimal_buf_size, FileStream};
+use crate::mem_cache::{MemFile, MEM_CACHE};
 
 pub(crate) async fn response_body(
     mut file: File,
     path: &PathBuf,
     meta: &Metadata,
     conditionals: ConditionalHeaders,
+    mem_cache: bool,
 ) -> Result<Response<Body>, StatusCode> {
     let mut len = meta.len();
     let modified = meta.modified().ok().map(LastModified::from);
@@ -43,9 +46,32 @@ pub(crate) async fn response_body(
 
                     let sub_len = end - start;
                     let reader = BufReader::new(file).take(sub_len);
-                    let stream = FileStream { reader, buf_size };
 
-                    let body = Body::wrap_stream(stream);
+                    let mime = mime_guess::from_path(path).first_or_octet_stream();
+                    let content_type = ContentType::from(mime);
+
+                    // In-memory file cache
+                    let mut path_str = None;
+                    if mem_cache {
+                        if let Some(path_s) = path.to_str() {
+                            if let Ok(mut cache) = MEM_CACHE.lock() {
+                                let mem_file = MemFile {
+                                    bytes: BytesMut::with_capacity(len as usize),
+                                    buf_size,
+                                    content_type: content_type.clone(),
+                                    last_modified: modified,
+                                };
+                                cache.insert(path_s.into(), mem_file);
+                                path_str = Some(path_s.to_owned());
+                            }
+                        }
+                    }
+
+                    let body = Body::wrap_stream(FileStream {
+                        reader,
+                        buf_size,
+                        path_str,
+                    });
                     let mut resp = Response::new(body);
 
                     if sub_len != len {
@@ -67,10 +93,8 @@ pub(crate) async fn response_body(
                         len = sub_len;
                     }
 
-                    let mime = mime_guess::from_path(path).first_or_octet_stream();
-
                     resp.headers_mut().typed_insert(ContentLength(len));
-                    resp.headers_mut().typed_insert(ContentType::from(mime));
+                    resp.headers_mut().typed_insert(content_type);
                     resp.headers_mut().typed_insert(AcceptRanges::bytes());
 
                     if let Some(last_modified) = modified {
@@ -79,7 +103,7 @@ pub(crate) async fn response_body(
 
                     Ok(resp)
                 })
-                .unwrap_or_else(|BadRange| {
+                .unwrap_or_else(|BadRangeError| {
                     // bad byte range
                     let mut resp = Response::new(Body::empty());
                     *resp.status_mut() = StatusCode::RANGE_NOT_SATISFIABLE;
@@ -91,9 +115,9 @@ pub(crate) async fn response_body(
     }
 }
 
-struct BadRange;
+pub(crate) struct BadRangeError;
 
-fn bytes_range(range: Option<Range>, max_len: u64) -> Result<(u64, u64), BadRange> {
+pub(crate) fn bytes_range(range: Option<Range>, max_len: u64) -> Result<(u64, u64), BadRangeError> {
     let range = if let Some(range) = range {
         range
     } else {
@@ -110,7 +134,7 @@ fn bytes_range(range: Option<Range>, max_len: u64) -> Result<(u64, u64), BadRang
                 (Bound::Included(a), Bound::Included(b)) => {
                     // `start` can not be greater than `end`
                     if a > b {
-                        return Err(BadRange);
+                        return Err(BadRangeError);
                     }
                     // For the special case where b == the file size
                     (a, if b == max_len { b } else { b + 1 })
@@ -147,11 +171,11 @@ fn bytes_range(range: Option<Range>, max_len: u64) -> Result<(u64, u64), BadRang
                 return Ok((start, max_len));
             }
 
-            Err(BadRange)
+            Err(BadRangeError)
         })
         .next()
         // NOTE: default to `BadRange` in case of wrong `Range` bytes format
-        .unwrap_or(Err(BadRange));
+        .unwrap_or(Err(BadRangeError));
 
     resp
 }

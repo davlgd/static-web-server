@@ -6,13 +6,14 @@
 //! Module that provides file stream functionality.
 //!
 
-use bytes::{Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use futures_util::Stream;
 use std::fs::Metadata;
 use std::io::Read;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use crate::mem_cache::MEM_CACHE;
 use crate::Result;
 
 #[cfg(unix)]
@@ -25,6 +26,7 @@ const DEFAULT_READ_BUF_SIZE: usize = 8_192;
 pub(crate) struct FileStream<T> {
     pub(crate) reader: T,
     pub(crate) buf_size: usize,
+    pub(crate) path_str: Option<String>,
 }
 
 impl<T: Read + Unpin> Stream for FileStream<T> {
@@ -32,11 +34,20 @@ impl<T: Read + Unpin> Stream for FileStream<T> {
 
     fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut buf = BytesMut::zeroed(self.buf_size);
+        let path_str = self.path_str.to_owned();
+
         match Pin::into_inner(self).reader.read(&mut buf[..]) {
             Ok(n) => {
                 if n == 0 {
                     Poll::Ready(None)
                 } else {
+                    if let Some(s) = path_str {
+                        if let Ok(mut guard) = MEM_CACHE.lock() {
+                            if let Some(mem_file) = guard.get_mut(s.as_str()) {
+                                mem_file.bytes.put(buf.clone());
+                            }
+                        }
+                    }
                     buf.truncate(n);
                     Poll::Ready(Some(Ok(buf.freeze())))
                 }
