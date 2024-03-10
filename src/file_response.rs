@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 use crate::conditional_headers::{ConditionalBody, ConditionalHeaders};
 use crate::file_stream::{optimal_buf_size, FileStream};
-use crate::mem_cache::{MemFile, MEM_CACHE};
+use crate::mem_cache::{MemFile, CACHE_MAX_FILE_SIZE, CACHE_STORE};
 
 pub(crate) async fn response_body(
     mut file: File,
@@ -34,6 +34,7 @@ pub(crate) async fn response_body(
         ConditionalBody::NoBody(resp) => Ok(resp),
         ConditionalBody::WithBody(range) => {
             let buf_size = optimal_buf_size(meta);
+
             bytes_range(range, len)
                 .map(|(start, end)| {
                     match file.seek(SeekFrom::Start(start)) {
@@ -51,18 +52,24 @@ pub(crate) async fn response_body(
                     let content_type = ContentType::from(mime);
 
                     // In-memory file cache
-                    let mut path_str = None;
-                    if mem_cache {
-                        if let Some(path_s) = path.to_str() {
-                            if let Ok(mut cache) = MEM_CACHE.lock() {
+                    let mut file_path = None;
+                    if mem_cache && len <= CACHE_MAX_FILE_SIZE {
+                        if let Some(path_str) = path.to_str() {
+                            if let Ok(mut cache) = CACHE_STORE.lock() {
+                                let data = BytesMut::with_capacity(len as usize);
+                                let content_type = content_type.clone();
                                 let mem_file = MemFile {
-                                    bytes: BytesMut::with_capacity(len as usize),
+                                    data,
                                     buf_size,
-                                    content_type: content_type.clone(),
+                                    content_type,
                                     last_modified: modified,
                                 };
-                                cache.insert(path_s.into(), mem_file);
-                                path_str = Some(path_s.to_owned());
+                                cache.insert(path_str.into(), mem_file);
+                                file_path = Some(path_str.to_owned());
+                                tracing::debug!(
+                                    "inserting `{}` to the in-memory cache map",
+                                    path_str
+                                );
                             }
                         }
                     }
@@ -70,7 +77,7 @@ pub(crate) async fn response_body(
                     let body = Body::wrap_stream(FileStream {
                         reader,
                         buf_size,
-                        path_str,
+                        file_path,
                     });
                     let mut resp = Response::new(body);
 

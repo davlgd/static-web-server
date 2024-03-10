@@ -22,13 +22,14 @@ use std::fs::{File, Metadata};
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::conditional_headers::ConditionalHeaders;
 use crate::file_path::{sanitize_path, PathExt};
 use crate::Result;
-use crate::{conditional_headers::ConditionalHeaders, mem_cache::mem_cache_response_body};
 use crate::{
     file_response::response_body,
     http_ext::{MethodExt, HTTP_SUPPORTED_METHODS},
 };
+use crate::{mem_cache::mem_cache_response_body, mem_cache::CACHE_STORE};
 
 #[cfg(feature = "compression")]
 use crate::compression_static;
@@ -37,7 +38,6 @@ use crate::compression_static;
 use crate::{
     directory_listing,
     directory_listing::{DirListFmt, DirListOpts},
-    mem_cache::MEM_CACHE,
 };
 
 const DEFAULT_INDEX_FILES: &[&str; 1] = &["index.html"];
@@ -95,8 +95,8 @@ pub async fn handle<'a>(opts: &HandleOpts<'a>) -> Result<(Response<Body>, bool),
     // In-memory file cache feature with eviction policy
     if opts.memory_cache {
         if let Some(path_str) = file_path.to_str() {
-            if let Ok(mut guard) = MEM_CACHE.lock() {
-                if let Some(mem_file) = guard.get(path_str) {
+            if let Ok(mut cache) = CACHE_STORE.lock() {
+                if let Some(mem_file) = cache.get(path_str) {
                     tracing::debug!(
                         "file `{}` found in the cache, returning it immediately",
                         path_str

@@ -22,22 +22,21 @@ use crate::file_response::{bytes_range, BadRangeError};
 use crate::file_stream::FileStream;
 
 // In-memory files cache capacity.
-const MAX_CACHE_SIZE: usize = 100000;
+const CACHE_CAPACITY: usize = 512;
 
-/// Maximum file size to be cached in memory (default 64MB).
-const _MAX_CACHE_FILE_SIZE: u64 = 67_108_864;
+/// Maximum file size to be cached in memory (default `8MB`).
+pub(crate) const CACHE_MAX_FILE_SIZE: u64 = 1024 * 1024 * 8;
 
 /// The in-memory files cache that holds all files and provides cache eviction policy.
-pub(crate) static MEM_CACHE: Lazy<Mutex<SieveCache<CompactString, MemFile>>> =
-    Lazy::new(|| Mutex::new(SieveCache::new(MAX_CACHE_SIZE).unwrap()));
+pub(crate) static CACHE_STORE: Lazy<Mutex<SieveCache<CompactString, MemFile>>> =
+    Lazy::new(|| Mutex::new(SieveCache::new(CACHE_CAPACITY).unwrap()));
 
-#[derive(Debug)]
 /// In-memory file representation which will be store in the cache.
 pub(crate) struct MemFile {
     /// Buffer size of current file.
     pub buf_size: usize,
     /// Bytes of the current file.
-    pub bytes: BytesMut,
+    pub data: BytesMut,
     /// `Content-Type` header of current file.
     pub content_type: ContentType,
     /// `Last Modified` header of current file.
@@ -54,7 +53,7 @@ pub(crate) fn mem_cache_response_body(
     match conditionals.check(modified) {
         ConditionalBody::NoBody(resp) => Ok(resp),
         ConditionalBody::WithBody(range) => {
-            let buf = file.bytes.clone();
+            let buf = file.data.clone().freeze();
             let mut len = buf.len() as u64;
             let mut reader = std::io::Cursor::new(buf);
             let buf_size = file.buf_size;
@@ -74,7 +73,7 @@ pub(crate) fn mem_cache_response_body(
                     let stream = FileStream {
                         reader,
                         buf_size,
-                        path_str: None,
+                        file_path: None,
                     };
                     let body = Body::wrap_stream(stream);
                     let mut resp = Response::new(body);
