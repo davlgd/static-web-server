@@ -6,7 +6,6 @@
 //! Module to transition files into HTTP responses.
 //!
 
-use bytes::BytesMut;
 use headers::{
     AcceptRanges, ContentLength, ContentRange, ContentType, HeaderMapExt, LastModified, Range,
 };
@@ -18,7 +17,7 @@ use std::path::PathBuf;
 
 use crate::conditional_headers::{ConditionalBody, ConditionalHeaders};
 use crate::file_stream::{optimal_buf_size, FileStream};
-use crate::mem_cache::{MemFile, CACHE_MAX_FILE_SIZE, CACHE_STORE};
+use crate::mem_cache::{MemFile, CACHE_FILE_MAX_SIZE, CACHE_STORE};
 
 pub(crate) async fn response_body(
     mut file: File,
@@ -51,25 +50,23 @@ pub(crate) async fn response_body(
                     let mime = mime_guess::from_path(path).first_or_octet_stream();
                     let content_type = ContentType::from(mime);
 
-                    // In-memory file cache
+                    // Add the file to the in-memory cache only under these conditions:
+                    // - if the feature is enabled
+                    // - if the file size does not exceed the maximum permitted
+                    // - if the file is not found in the cache store
                     let mut file_path = None;
-                    if mem_cache && len <= CACHE_MAX_FILE_SIZE {
+                    if mem_cache && len <= CACHE_FILE_MAX_SIZE {
                         if let Some(path_str) = path.to_str() {
                             if let Ok(mut cache) = CACHE_STORE.lock() {
-                                let data = BytesMut::with_capacity(len as usize);
                                 let content_type = content_type.clone();
-                                let mem_file = MemFile {
-                                    data,
-                                    buf_size,
-                                    content_type,
-                                    last_modified: modified,
-                                };
+                                let mem_file = MemFile::new(len, buf_size, content_type, modified);
+                                tracing::debug!(
+                                    "inserting `{}` to the in-memory cache store: {:?}",
+                                    path_str,
+                                    mem_file
+                                );
                                 cache.insert(path_str.into(), mem_file);
                                 file_path = Some(path_str.to_owned());
-                                tracing::debug!(
-                                    "inserting `{}` to the in-memory cache map",
-                                    path_str
-                                );
                             }
                         }
                     }

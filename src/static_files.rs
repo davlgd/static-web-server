@@ -24,12 +24,12 @@ use std::path::{Path, PathBuf};
 
 use crate::conditional_headers::ConditionalHeaders;
 use crate::file_path::{sanitize_path, PathExt};
+use crate::mem_cache::CACHE_STORE;
 use crate::Result;
 use crate::{
     file_response::response_body,
     http_ext::{MethodExt, HTTP_SUPPORTED_METHODS},
 };
-use crate::{mem_cache::mem_cache_response_body, mem_cache::CACHE_STORE};
 
 #[cfg(feature = "compression")]
 use crate::compression_static;
@@ -96,14 +96,32 @@ pub async fn handle<'a>(opts: &HandleOpts<'a>) -> Result<(Response<Body>, bool),
     if opts.memory_cache {
         if let Some(path_str) = file_path.to_str() {
             if let Ok(mut cache) = CACHE_STORE.lock() {
-                if let Some(mem_file) = cache.get(path_str) {
-                    tracing::debug!(
-                        "file `{}` found in the cache, returning it immediately",
-                        path_str
-                    );
-                    let resp = mem_cache_response_body(mem_file, headers_opt)?;
-                    let is_precompressed = false;
-                    return Ok((resp, is_precompressed));
+                match cache.get(path_str) {
+                    Some(mem_file) => {
+                        if !mem_file.has_expired() {
+                            tracing::debug!(
+                                "file `{}` found in the in-memory cache store and valid, returning it immediately",
+                                path_str
+                            );
+                            let resp = mem_file.response_body(headers_opt)?;
+                            let is_precompressed = false;
+                            return Ok((resp, is_precompressed));
+                        }
+
+                        // Otherwise, if the file has expired due to TTL
+                        // then remove it from the cache and continue
+                        cache.remove(path_str);
+                        tracing::debug!(
+                            "file `{}` found in the in-memory cache store but TTL has expired, removed",
+                            path_str
+                        );
+                    }
+                    _ => {
+                        tracing::debug!(
+                            "file `{}` was not found in the in-memory cache store, continuing",
+                            path_str
+                        );
+                    }
                 }
             }
         }
