@@ -48,7 +48,7 @@ mod tests {
             #[cfg(feature = "compression")]
             compression_static: true,
             ignore_hidden_files: false,
-            memory_cache: false,
+            memory_cache: None,
             index_files: &[],
         })
         .await
@@ -108,7 +108,7 @@ mod tests {
             #[cfg(feature = "compression")]
             compression_static: true,
             ignore_hidden_files: false,
-            memory_cache: false,
+            memory_cache: None,
             index_files: &[],
         })
         .await
@@ -162,7 +162,7 @@ mod tests {
             redirect_trailing_slash: true,
             compression_static: true,
             ignore_hidden_files: false,
-            memory_cache: false,
+            memory_cache: None,
             index_files: &[],
         })
         .await

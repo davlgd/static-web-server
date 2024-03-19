@@ -49,7 +49,7 @@ mod tests {
                 redirect_trailing_slash: true,
                 compression_static: false,
                 ignore_hidden_files: false,
-                memory_cache: false,
+                memory_cache: None,
                 index_files: &[],
             })
             .await
@@ -81,7 +81,7 @@ mod tests {
                 redirect_trailing_slash: true,
                 compression_static: false,
                 ignore_hidden_files: false,
-                memory_cache: false,
+                memory_cache: None,
                 index_files: &[],
             })
             .await
@@ -123,7 +123,7 @@ mod tests {
                 redirect_trailing_slash: false,
                 compression_static: false,
                 ignore_hidden_files: false,
-                memory_cache: false,
+                memory_cache: None,
                 index_files: &[],
             })
             .await
@@ -165,7 +165,7 @@ mod tests {
                 redirect_trailing_slash: false,
                 compression_static: false,
                 ignore_hidden_files: false,
-                memory_cache: false,
+                memory_cache: None,
                 index_files: &[],
             })
             .await
@@ -197,7 +197,7 @@ mod tests {
                 redirect_trailing_slash: true,
                 compression_static: false,
                 ignore_hidden_files: false,
-                memory_cache: false,
+                memory_cache: None,
                 index_files: &[],
             })
             .await
@@ -250,7 +250,7 @@ mod tests {
                 redirect_trailing_slash: true,
                 compression_static: false,
                 ignore_hidden_files: true,
-                memory_cache: false,
+                memory_cache: None,
                 index_files: &[],
             })
             .await
@@ -321,7 +321,7 @@ mod tests {
                 redirect_trailing_slash: true,
                 compression_static: false,
                 ignore_hidden_files: false,
-                memory_cache: false,
+                memory_cache: None,
                 index_files: &[],
             })
             .await
@@ -365,7 +365,7 @@ mod tests {
                 redirect_trailing_slash: true,
                 compression_static: false,
                 ignore_hidden_files: true,
-                memory_cache: false,
+                memory_cache: None,
                 index_files: &[],
             })
             .await

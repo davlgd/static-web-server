@@ -24,7 +24,7 @@ use {
     hyper::service::{make_service_fn, service_fn},
 };
 
-use crate::{cors, helpers, Settings};
+use crate::{cors, helpers, mem_cache, Settings};
 use crate::{service::RouterService, Context, Result};
 
 /// Define a multi-threaded HTTP or HTTP/2 web server.
@@ -336,8 +336,22 @@ impl Server {
         );
 
         // In-memory files cache option
-        let memory_cache = general.memory_cache;
-        server_info!("in-memory files cache: enabled={}", memory_cache);
+        let mut memory_cache = None;
+        if general.memory_cache {
+            let max_size = general.memory_cache_max_size;
+            let file_max_size = general.memory_cache_file_max_size;
+            let file_ttl = general.memory_cache_file_ttl;
+            let mem_opts = mem_cache::MemCacheOpts::new(max_size, file_max_size, file_ttl);
+            server_info!(
+                "in-memory files cache: enabled={}, max_size={}, file_max_size={}MB, file_ttl={}s",
+                general.memory_cache,
+                max_size,
+                file_max_size,
+                file_ttl
+            );
+            mem_cache::init_store(&mem_opts)?;
+            memory_cache = Some(mem_opts);
+        }
 
         // Create a service router for Hyper
         let router_service = RouterService::new(RequestHandler {

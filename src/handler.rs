@@ -27,7 +27,9 @@ use crate::fallback_page;
 use crate::{
     control_headers, cors, custom_headers, error_page,
     http_ext::MethodExt,
-    maintenance_mode, redirects, rewrites, security_headers,
+    maintenance_mode,
+    mem_cache::MemCacheOpts,
+    redirects, rewrites, security_headers,
     settings::{file::RedirectsKind, Advanced},
     static_files::{self, HandleOpts},
     virtual_hosts, Error, Result,
@@ -42,7 +44,7 @@ pub struct RequestHandlerOpts {
     /// Root directory of static files.
     pub root_dir: PathBuf,
     /// In-memory cache feature.
-    pub memory_cache: bool,
+    pub memory_cache: Option<MemCacheOpts>,
     /// Compression feature.
     pub compression: bool,
     /// Compression static feature.
@@ -135,7 +137,7 @@ impl RequestHandler {
         #[cfg(all(unix, feature = "experimental"))]
         let experimental_metrics = self.opts.experimental_metrics;
         let index_files: Vec<&str> = self.opts.index_files.iter().map(|s| s.as_str()).collect();
-        let memory_cache = self.opts.memory_cache;
+        let memory_cache = self.opts.memory_cache.as_ref();
 
         let mut cors_headers: Option<HeaderMap> = None;
 

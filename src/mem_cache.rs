@@ -12,7 +12,7 @@ use headers::{
     AcceptRanges, ContentLength, ContentRange, ContentType, HeaderMap, HeaderMapExt, LastModified,
 };
 use hyper::{Body, Response, StatusCode};
-use once_cell::sync::Lazy;
+use once_cell::sync::OnceCell;
 use sieve_cache::SieveCache;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::Mutex;
@@ -21,20 +21,47 @@ use std::time::{Duration, Instant};
 use crate::conditional_headers::{ConditionalBody, ConditionalHeaders};
 use crate::file_response::{bytes_range, BadRangeError};
 use crate::file_stream::FileStream;
-
-/// Default maximum number of file entries in the cache.
-const CACHE_MAX_SIZE: usize = 512;
-
-/// Default maximum size per file to be cached (default `8MB`).
-pub(crate) const CACHE_FILE_MAX_SIZE: u64 = 1024 * 1024 * 8;
-
-/// Default TTL (Time-to-live) expiration in seconds per file in the cache. (default `60min`).
-const CACHE_FILE_TTL: u64 = 3600;
+use crate::Result;
 
 /// Global cache that stores all files in memory.
 /// It provides eviction policy using the SIEVE algorithm and TTL (Time-to-live) support.
-pub(crate) static CACHE_STORE: Lazy<Mutex<SieveCache<CompactString, MemFile>>> =
-    Lazy::new(|| Mutex::new(SieveCache::new(CACHE_MAX_SIZE).unwrap()));
+pub(crate) static CACHE_STORE: OnceCell<Mutex<SieveCache<CompactString, MemFile>>> =
+    OnceCell::new();
+
+/// It defines the in-memory files cache options.
+pub struct MemCacheOpts {
+    /// The maximum size of the cache entries.
+    pub max_size: usize,
+    /// The maximum size per file in bytes.
+    pub file_max_size: u64,
+    /// The TTL per file in seconds.
+    pub file_ttl: u64,
+}
+
+impl MemCacheOpts {
+    /// Creates a new isntance of `MemCacheOpts`.
+    pub fn new(max_size: usize, file_max_size: u64, file_ttl: u64) -> Self {
+        Self {
+            max_size,
+            file_max_size: 1024 * 1024 * file_max_size,
+            file_ttl,
+        }
+    }
+}
+
+/// Make sure to initialize the in-memory cache store.
+pub fn init_store(opts: &MemCacheOpts) -> Result {
+    let cache = match SieveCache::new(opts.max_size) {
+        Ok(v) => v,
+        Err(err) => bail!(err),
+    };
+    if CACHE_STORE.set(Mutex::new(cache)).is_err() {
+        bail!("unable to initialize the in-memory cache store")
+    }
+    tracing::debug!("the in-memory cache store was initialized successfully");
+
+    Ok(())
+}
 
 /// In-memory file representation to be store in the cache.
 #[derive(Debug)]
@@ -57,13 +84,14 @@ impl MemFile {
         buf_size: usize,
         content_type: ContentType,
         last_modified: Option<LastModified>,
+        file_ttl: u64,
     ) -> Self {
         Self {
             data: BytesMut::with_capacity(len as usize),
             buf_size,
             content_type,
             last_modified,
-            expiration: Instant::now() + Duration::new(CACHE_FILE_TTL, 0),
+            expiration: Instant::now() + Duration::new(file_ttl, 0),
         }
     }
 

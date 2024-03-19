@@ -44,7 +44,7 @@ impl<T: Read + Unpin> Stream for FileStream<T> {
                     buf.truncate(n);
                     let buf = buf.freeze();
                     if let Some(s) = file_path {
-                        if let Ok(mut cache) = CACHE_STORE.lock() {
+                        if let Ok(mut cache) = CACHE_STORE.get().unwrap().lock() {
                             if let Some(mem_file) = cache.get_mut(s.as_str()) {
                                 mem_file.data.put(buf.clone());
                             }

@@ -17,14 +17,14 @@ use std::path::PathBuf;
 
 use crate::conditional_headers::{ConditionalBody, ConditionalHeaders};
 use crate::file_stream::{optimal_buf_size, FileStream};
-use crate::mem_cache::{MemFile, CACHE_FILE_MAX_SIZE, CACHE_STORE};
+use crate::mem_cache::{MemCacheOpts, MemFile, CACHE_STORE};
 
 pub(crate) async fn response_body(
     mut file: File,
     path: &PathBuf,
     meta: &Metadata,
     conditionals: ConditionalHeaders,
-    mem_cache: bool,
+    memory_cache: Option<&MemCacheOpts>,
 ) -> Result<Response<Body>, StatusCode> {
     let mut len = meta.len();
     let modified = meta.modified().ok().map(LastModified::from);
@@ -55,18 +55,26 @@ pub(crate) async fn response_body(
                     // - if the file size does not exceed the maximum permitted
                     // - if the file is not found in the cache store
                     let mut file_path = None;
-                    if mem_cache && len <= CACHE_FILE_MAX_SIZE {
-                        if let Some(path_str) = path.to_str() {
-                            if let Ok(mut cache) = CACHE_STORE.lock() {
-                                let content_type = content_type.clone();
-                                let mem_file = MemFile::new(len, buf_size, content_type, modified);
-                                tracing::debug!(
-                                    "inserting `{}` to the in-memory cache store: {:?}",
-                                    path_str,
-                                    mem_file
-                                );
-                                cache.insert(path_str.into(), mem_file);
-                                file_path = Some(path_str.to_owned());
+                    if let Some(memc_opts) = memory_cache {
+                        if len <= memc_opts.file_max_size {
+                            if let Some(path_str) = path.to_str() {
+                                if let Ok(mut cache) = CACHE_STORE.get().unwrap().lock() {
+                                    let content_type = content_type.clone();
+                                    let mem_file = MemFile::new(
+                                        len,
+                                        buf_size,
+                                        content_type,
+                                        modified,
+                                        memc_opts.file_ttl,
+                                    );
+                                    tracing::debug!(
+                                        "inserting `{}` to the in-memory cache store: {:?}",
+                                        path_str,
+                                        mem_file
+                                    );
+                                    cache.insert(path_str.into(), mem_file);
+                                    file_path = Some(path_str.to_owned());
+                                }
                             }
                         }
                     }

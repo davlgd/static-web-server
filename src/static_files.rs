@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use crate::conditional_headers::ConditionalHeaders;
 use crate::file_path::{sanitize_path, PathExt};
-use crate::mem_cache::CACHE_STORE;
+use crate::mem_cache::{MemCacheOpts, CACHE_STORE};
 use crate::Result;
 use crate::{
     file_response::response_body,
@@ -47,7 +47,7 @@ pub struct HandleOpts<'a> {
     /// Request method.
     pub method: &'a Method,
     /// In-memory files cache feature.
-    pub memory_cache: bool,
+    pub memory_cache: Option<&'a MemCacheOpts>,
     /// Request headers.
     pub headers: &'a HeaderMap<HeaderValue>,
     /// Request base path.
@@ -91,11 +91,12 @@ pub async fn handle<'a>(opts: &HandleOpts<'a>) -> Result<(Response<Body>, bool),
 
     let headers_opt = opts.headers;
     let mut file_path = sanitize_path(opts.base_path, uri_path)?;
+    let memory_cache = opts.memory_cache;
 
     // In-memory file cache feature with eviction policy
-    if opts.memory_cache {
+    if memory_cache.is_some() {
         if let Some(path_str) = file_path.to_str() {
-            if let Ok(mut cache) = CACHE_STORE.lock() {
+            if let Ok(mut cache) = CACHE_STORE.get().unwrap().lock() {
                 match cache.get(path_str) {
                     Some(mem_file) => {
                         if !mem_file.has_expired() {
@@ -207,7 +208,7 @@ pub async fn handle<'a>(opts: &HandleOpts<'a>) -> Result<(Response<Body>, bool),
             file_path,
             &metadata,
             Some(precomp_path),
-            opts.memory_cache,
+            memory_cache,
         )
         .await?;
 
@@ -219,7 +220,7 @@ pub async fn handle<'a>(opts: &HandleOpts<'a>) -> Result<(Response<Body>, bool),
         return Ok((resp, is_precompressed));
     }
 
-    let resp = file_reply(headers_opt, file_path, &metadata, None, opts.memory_cache).await?;
+    let resp = file_reply(headers_opt, file_path, &metadata, None, memory_cache).await?;
 
     Ok((resp, is_precompressed))
 }
@@ -417,7 +418,7 @@ fn file_reply<'a>(
     path: &'a PathBuf,
     meta: &'a Metadata,
     path_precompressed: Option<PathBuf>,
-    memory_cache: bool,
+    memory_cache: Option<&'a MemCacheOpts>,
 ) -> impl Future<Output = Result<Response<Body>, StatusCode>> + Send + 'a {
     let conditionals = ConditionalHeaders::new(headers);
     let file_path = path_precompressed.as_ref().unwrap_or(path);
